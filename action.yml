@@ -1,0 +1,83 @@
+name: "Build and Export IPA"
+description: "Build an iOS application using Flutter and export the IPA file for distribution."
+
+inputs:
+  ios-build-certificate-base64:
+    description: "Base64-encoded P12 certificate"
+    required: true
+  ios-build-certificate-password:
+    description: "Password for the P12 certificate"
+    required: true
+  ios-mobile-provisioning-profile-base64:
+    description: "Base64-encoded mobile provisioning profile"
+    required: true
+  ios-keychain-password:
+    description: "Password for the created keychain"
+    required: true
+  apple-developer-team-id:
+    description: "Apple Developer Team ID"
+    required: false
+  ios-export-options-plist:
+    description: "Path to the ExportOptions.plist file, if not specified, the default export options will be used"
+    required: false
+  ipa-export-directory:
+    description: "Directory to export the IPA file, defaults to $PWD/build/IPA"
+    required: false
+outputs:
+  ipa-path:
+    description: "The path to the generated IPA file"
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install the Apple certificate and provisioning profile
+      shell: bash
+      env:
+        IOS_BUILD_CERTIFICATE_BASE64: ${{ inputs['ios-build-certificate-base64'] }}
+        IOS_BUILD_CERTIFICATE_PASSWORD: ${{ inputs['ios-build-certificate-password'] }}
+        IOS_MOBILE_PROVISIONING_PROFILE_BASE64: ${{ inputs['ios-mobile-provisioning-profile-base64'] }}
+        IOS_GITHUB_KEYCHAIN_PASSWORD: ${{ inputs['ios-keychain-password'] }}
+      run: |
+        # create variables
+        CERTIFICATE_PATH=$RUNNER_TEMP/build_certificate.p12
+        KEYCHAIN_PATH=$RUNNER_TEMP/app-signing.keychain-db
+        PP_PATH=$RUNNER_TEMP/temp.mobileprovision
+
+
+        # import certificate and provisioning profile from secrets
+        echo -n "$IOS_BUILD_CERTIFICATE_BASE64" | base64 --decode -o $CERTIFICATE_PATH
+        echo -n "$IOS_MOBILE_PROVISIONING_PROFILE_BASE64" | base64 --decode -o $PP_PATH
+
+        # create temporary keychain
+        security create-keychain -p "$IOS_GITHUB_KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+        security set-keychain-settings -lut 21600 $KEYCHAIN_PATH
+        security unlock-keychain -p "$IOS_GITHUB_KEYCHAIN_PASSWORD" $KEYCHAIN_PATH
+
+        # import certificate to keychain
+        security import $CERTIFICATE_PATH -P "$IOS_BUILD_CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k $KEYCHAIN_PATH
+        security list-keychain -d user -s $KEYCHAIN_PATH
+        security find-identity -v
+
+        # use uuid for the name of provisioning profile
+        UUID=$(/usr/libexec/PlistBuddy -c "Print UUID" /dev/stdin <<< $(/usr/bin/security cms -D -i $PP_PATH))
+
+        # apply provisioning profile
+        mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+        cp $PP_PATH ~/Library/MobileDevice/Provisioning\ Profiles/$UUID.mobileprovision
+
+    - name: Build and Export IPA
+      env:
+        APPLE_DEVELOPER_TEAM_ID: ${{ inputs['apple-developer-team-id'] }}
+        EXPORT_OPTIONS_PLIST_PATH: ${{ inputs['ios-export-options-plist'] }}
+        IPA_EXPORT_DIRECTORY: ${{ inputs['ipa-export-directory'] }}
+      run: |
+        chmod +x ./scripts/ios_build_sign.sh
+        ./scripts/ios_build_sign.sh
+
+    - name: Clean up any certificates and provisioning profiles
+      if: ${{ always() }}
+      run: |
+        security delete-keychain $RUNNER_TEMP/app-signing.keychain-db
+        rm -f ~/Library/MobileDevice/Provisioning\ Profiles/*.mobileprovision
+        rm -f $RUNNER_TEMP/build_certificate.p12
+        rm -f $RUNNER_TEMP/temp.mobileprovision
